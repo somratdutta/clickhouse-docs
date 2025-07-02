@@ -5,7 +5,7 @@ title: 'REST Catalog'
 pagination_prev: null
 pagination_next: null
 description: 'In this guide, we will walk you through the steps to query
- your data in S3 buckets using ClickHouse and the REST Catalog (Tabular.io).'
+ your data in S3 buckets using ClickHouse and the REST Catalog.'
 keywords: ['REST', 'Tabular', 'Data Lake', 'Iceberg']
 show_related_blogs: true
 ---
@@ -19,68 +19,72 @@ Integration with the REST Catalog works with Iceberg tables only.
 This integration supports both AWS S3 and other cloud storage providers.
 :::
 
-ClickHouse supports integration with multiple catalogs (Unity, Glue, REST, Polaris, etc.). This guide will walk you through the steps to query your data managed by Tabular.io using ClickHouse and the [REST Catalog](https://tabular.io/).
+ClickHouse supports integration with multiple catalogs (Unity, Glue, REST, Polaris, etc.). This guide will walk you through the steps to query your data using ClickHouse and the [REST Catalog](https://github.com/apache/iceberg/blob/main/open-api/rest-catalog-open-api.yaml/) specification.
 
-The REST Catalog is a standardized API specification for Iceberg catalogs, widely supported by various platforms including Tabular.io, which provides a managed Iceberg catalog service.
+The REST Catalog is a standardized API specification for Iceberg catalogs, supported by various platforms including:
+- **Local development environments** (using docker-compose setups)
+- **Managed services** like Tabular.io
+- **Self-hosted** REST catalog implementations
 
 :::note
 As this feature is experimental, you will need to enable it using:
 `SET allow_experimental_database_rest_catalog = 1;`
 :::
 
-## Configuring REST Catalog in Tabular.io {#configuring-rest-catalog-in-tabular}
+## Local Development Setup {#local-development-setup}
 
-To allow ClickHouse to interact with the REST catalog, you need to configure authentication and access to your Tabular.io workspace.
+For local development and testing, you can use a containerized REST catalog setup. This approach is ideal for learning, prototyping, and development environments.
 
-### Prerequisites {#prerequisites}
+### Prerequisites {#local-prerequisites}
 
-1. **Tabular.io Account**: Sign up for a [Tabular.io account](https://tabular.io/) if you don't have one
-2. **Warehouse Setup**: Create a warehouse in your Tabular.io workspace
-3. **Authentication Credentials**: Generate API credentials for programmatic access
+1. **Docker and Docker Compose**: Ensure Docker is installed and running
+2. **Sample Setup**: You can use various docker-compose setups (see Alternative Docker Images below)
 
-### Authentication Methods {#authentication-methods}
+### Setting up Local REST Catalog {#setting-up-local-rest-catalog}
 
-Tabular.io supports several authentication methods:
+You can use various containerized REST catalog implementations such as **[Databricks docker-spark-iceberg](https://github.com/databricks/docker-spark-iceberg/blob/main/docker-compose.yml?ref=blog.min.io)** which provides a complete Spark + Iceberg + REST catalog environment with docker-compose, making it ideal for testing Iceberg integrations.
 
-* **OAuth2 Client Credentials**: Recommended for production environments
-* **Bearer Token**: Simple token-based authentication
-* **Basic Authentication**: Username/password authentication
+You'll need to add ClickHouse as a dependency in your docker-compose setup:
 
-## Creating a connection between REST Catalog and ClickHouse {#creating-a-connection-between-rest-catalog-and-clickhouse}
-
-With your REST catalog configured and authentication in place, establish a connection between ClickHouse and the REST catalog.
-
-### Using OAuth2 Client Credentials {#using-oauth2-client-credentials}
-
-```sql
-CREATE DATABASE rest_catalog
-ENGINE = DataLakeCatalog('https://api.tabular.io/ws/<workspace-id>/v1/<warehouse-name>')
-SETTINGS 
-    catalog_type = 'rest',
-    catalog_credential = '<client-id>:<client-secret>',
-    oauth_server_uri = 'https://api.tabular.io/oauth/tokens',
-    auth_scope = 'catalog:read'
+```yaml
+clickhouse:
+  image: clickhouse/clickhouse-server:main
+  container_name: clickhouse
+  user: '0:0'  # Ensures root permissions
+  networks:
+    iceberg_net:
+  ports:
+    - "8123:8123"
+    - "9002:9000"
+  volumes:
+    - ./clickhouse:/var/lib/clickhouse
+    - ./clickhouse/data_import:/var/lib/clickhouse/data_import  # Mount dataset folder
+  networks:
+    - iceberg_net
+  environment:
+    - CLICKHOUSE_DB=default
+    - CLICKHOUSE_USER=default
+    - CLICKHOUSE_DO_NOT_CHOWN=1
+    - CLICKHOUSE_PASSWORD=
 ```
 
-### Using Bearer Token {#using-bearer-token}
+### Connecting to Local REST Catalog {#connecting-to-local-rest-catalog}
 
-```sql
-CREATE DATABASE rest_catalog 
-ENGINE = DataLakeCatalog('https://api.tabular.io/ws/<workspace-id>/v1/<warehouse-name>')
-SETTINGS 
-    catalog_type = 'rest',
-    catalog_credential = '<bearer-token>'
+Connect to your ClickHouse container:
+
+```bash
+docker exec -it clickhouse clickhouse-client
 ```
 
-### Using Basic Authentication {#using-basic-authentication}
+Then create the database connection to the REST catalog:
 
 ```sql
-CREATE DATABASE rest_catalog
-ENGINE = DataLakeCatalog('https://api.tabular.io/ws/<workspace-id>/v1/<warehouse-name>')
+CREATE DATABASE demo
+ENGINE = DataLakeCatalog('http://rest:8181/v1', 'admin', 'password')
 SETTINGS 
-    catalog_type = 'rest',
-    catalog_credential = '<username>:<password>',
-    auth_header_type = 'basic'
+    catalog_type = 'rest', 
+    storage_endpoint = 'http://minio:9000/lakehouse', 
+    warehouse = 'demo'
 ```
 
 ## Querying REST catalog tables using ClickHouse {#querying-rest-catalog-tables-using-clickhouse}
@@ -88,30 +92,26 @@ SETTINGS
 Now that the connection is in place, you can start querying via the REST catalog. For example:
 
 ```sql
-USE rest_catalog;
+USE demo;
 
 SHOW TABLES;
 ```
 
 ```sql title="Response"
-┌─name────────────────────────────┐
-│ sales.customer_orders           │
-│ sales.products                  │
-│ analytics.daily_metrics         │
-│ analytics.user_events           │
-│ inventory.stock_levels          │
-└─────────────────────────────────┘
+┌─name──────────┐
+│ default.taxis │
+└───────────────┘
 ```
 
 To query a table:
 
 ```sql
-SELECT count(*) FROM `sales.customer_orders`;
+SELECT count(*) FROM `default.taxis`;
 ```
 
 ```sql title="Response"
 ┌─count()─┐
-│ 1542897 │
+│ 2171187 │
 └─────────┘
 ```
 
@@ -122,88 +122,35 @@ Backticks are required because ClickHouse doesn't support more than one namespac
 To inspect the table DDL:
 
 ```sql
-SHOW CREATE TABLE `sales.customer_orders`;
+SHOW CREATE TABLE `default.taxis`;
 ```
 
 ```sql title="Response"
-┌─statement─────────────────────────────────────────────────┐
-│ CREATE TABLE rest_catalog.`sales.customer_orders`        │
-│ (                                                         │
-│     `order_id` Nullable(Int64),                          │
-│     `customer_id` Nullable(Int64),                       │
-│     `order_date` Nullable(Date),                         │
-│     `order_timestamp` Nullable(DateTime64(6)),           │
-│     `total_amount` Nullable(Decimal(10, 2)),             │
-│     `currency` Nullable(String),                         │
-│     `status` Nullable(String),                           │
-│     `shipping_address` Nullable(String),                 │
-│     `billing_address` Nullable(String),                  │
-│     `payment_method` Nullable(String),                   │
-│     `discount_amount` Nullable(Decimal(10, 2)),          │
-│     `tax_amount` Nullable(Decimal(10, 2)),               │
-│     `created_at` Nullable(DateTime64(6)),                │
-│     `updated_at` Nullable(DateTime64(6))                 │
-│ )                                                         │
-│ ENGINE = Iceberg('s3://tabular-warehouse/sales/orders/') │
-└───────────────────────────────────────────────────────────┘
-```
-
-### Advanced Querying Examples {#advanced-querying-examples}
-
-Query with filtering and aggregation:
-
-```sql
-SELECT 
-    status,
-    COUNT(*) as order_count,
-    SUM(total_amount) as total_revenue
-FROM `sales.customer_orders`
-WHERE order_date >= '2024-01-01'
-GROUP BY status
-ORDER BY total_revenue DESC;
-```
-
-```sql title="Response"
-┌─status─────┬─order_count─┬─total_revenue─┐
-│ completed  │      856432 │   12847392.45 │
-│ shipped    │      234567 │    3521847.23 │
-│ processing │       89234 │    1234567.89 │
-│ cancelled  │       23456 │     345678.90 │
-└────────────┴─────────────┴───────────────┘
-```
-
-Time-series analysis:
-
-```sql
-SELECT 
-    toStartOfMonth(order_date) as month,
-    COUNT(*) as orders,
-    AVG(total_amount) as avg_order_value
-FROM `sales.customer_orders`
-WHERE order_date >= '2024-01-01'
-GROUP BY month
-ORDER BY month;
-```
-
-## Working with Partitioned Tables {#working-with-partitioned-tables}
-
-REST catalogs often contain partitioned Iceberg tables for better performance:
-
-```sql
--- Query specific partition
-SELECT COUNT(*) 
-FROM `analytics.user_events`
-WHERE event_date = '2024-01-15';
-
--- Query across multiple partitions
-SELECT 
-    event_date,
-    event_type,
-    COUNT(*) as event_count
-FROM `analytics.user_events`
-WHERE event_date BETWEEN '2024-01-01' AND '2024-01-31'
-GROUP BY event_date, event_type
-ORDER BY event_date, event_count DESC;
+┌─statement─────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE demo.`default.taxis`                                                             │
+│ (                                                                                             │
+│     `VendorID` Nullable(Int64),                                                               │
+│     `tpep_pickup_datetime` Nullable(DateTime64(6)),                                           │
+│     `tpep_dropoff_datetime` Nullable(DateTime64(6)),                                          │
+│     `passenger_count` Nullable(Float64),                                                      │
+│     `trip_distance` Nullable(Float64),                                                        │
+│     `RatecodeID` Nullable(Float64),                                                           │
+│     `store_and_fwd_flag` Nullable(String),                                                    │
+│     `PULocationID` Nullable(Int64),                                                           │
+│     `DOLocationID` Nullable(Int64),                                                           │
+│     `payment_type` Nullable(Int64),                                                           │
+│     `fare_amount` Nullable(Float64),                                                          │
+│     `extra` Nullable(Float64),                                                                │
+│     `mta_tax` Nullable(Float64),                                                              │
+│     `tip_amount` Nullable(Float64),                                                           │
+│     `tolls_amount` Nullable(Float64),                                                         │
+│     `improvement_surcharge` Nullable(Float64),                                                │
+│     `total_amount` Nullable(Float64),                                                         │
+│     `congestion_surcharge` Nullable(Float64),                                                 │
+│     `airport_fee` Nullable(Float64)                                                           │
+│ )                                                                                             │
+│ ENGINE = Iceberg('http://minio:9000/lakehouse/warehouse/default/taxis/', 'admin', '[HIDDEN]') │
+└───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Loading data from your Data Lake into ClickHouse {#loading-data-from-your-data-lake-into-clickhouse}
@@ -211,91 +158,36 @@ ORDER BY event_date, event_count DESC;
 If you need to load data from the REST catalog into ClickHouse, start by creating a local ClickHouse table:
 
 ```sql
-CREATE TABLE customer_orders
+CREATE TABLE taxis
 (
-    `order_id` Int64,
-    `customer_id` Int64,
-    `order_date` Date,
-    `order_timestamp` DateTime64(6),
-    `total_amount` Decimal(10, 2),
-    `currency` String,
-    `status` String,
-    `shipping_address` String,
-    `billing_address` String,
-    `payment_method` String,
-    `discount_amount` Decimal(10, 2),
-    `tax_amount` Decimal(10, 2),
-    `created_at` DateTime64(6),
-    `updated_at` DateTime64(6)
+    `VendorID` Int64,
+    `tpep_pickup_datetime` DateTime64(6),
+    `tpep_dropoff_datetime` DateTime64(6),
+    `passenger_count` Float64,
+    `trip_distance` Float64,
+    `RatecodeID` Float64,
+    `store_and_fwd_flag` String,
+    `PULocationID` Int64,
+    `DOLocationID` Int64,
+    `payment_type` Int64,
+    `fare_amount` Float64,
+    `extra` Float64,
+    `mta_tax` Float64,
+    `tip_amount` Float64,
+    `tolls_amount` Float64,
+    `improvement_surcharge` Float64,
+    `total_amount` Float64,
+    `congestion_surcharge` Float64,
+    `airport_fee` Float64
 )
 ENGINE = MergeTree()
-PARTITION BY toYYYYMM(order_date)
-ORDER BY (customer_id, order_date, order_id);
+PARTITION BY toYYYYMM(tpep_pickup_datetime)
+ORDER BY (VendorID, tpep_pickup_datetime, PULocationID, DOLocationID);
 ```
 
 Then load the data from your REST catalog table via an `INSERT INTO SELECT`:
 
 ```sql
-INSERT INTO customer_orders 
-SELECT * FROM rest_catalog.`sales.customer_orders`;
+INSERT INTO taxis 
+SELECT * FROM demo.`default.taxis`;
 ```
-
-### Incremental Data Loading {#incremental-data-loading}
-
-For large tables, consider incremental loading:
-
-```sql
--- Load only recent data
-INSERT INTO customer_orders 
-SELECT * FROM rest_catalog.`sales.customer_orders`
-WHERE updated_at > (
-    SELECT MAX(updated_at) FROM customer_orders
-);
-```
-
-## Best Practices {#best-practices}
-
-1. **Use appropriate authentication**: OAuth2 for production, bearer tokens for development
-2. **Leverage partitioning**: Query specific partitions when possible for better performance
-3. **Monitor costs**: REST catalog queries may incur costs based on data scanned
-4. **Use projection pushdown**: ClickHouse automatically pushes down filters and projections
-5. **Consider data locality**: Co-locate ClickHouse and your data storage for better performance
-
-## Troubleshooting {#troubleshooting}
-
-### Common Issues {#common-issues}
-
-**Authentication failures:**
-```sql
--- Verify your credentials are correct
-SELECT * FROM system.databases WHERE name = 'rest_catalog';
-```
-
-**Connection timeouts:**
-```sql
--- Increase timeout settings
-SET rest_catalog_connection_timeout = 30;
-SET rest_catalog_read_timeout = 60;
-```
-
-**Table not found errors:**
-```sql
--- Check available namespaces
-SHOW DATABASES FROM rest_catalog;
-
--- List tables in specific namespace
-SHOW TABLES FROM rest_catalog LIKE 'sales.%';
-```
-
-## Configuration Reference {#configuration-reference}
-
-| Setting | Description | Required | Default |
-|---------|-------------|----------|---------|
-| `catalog_type` | Must be set to 'rest' | Yes | - |
-| `catalog_credential` | Authentication credentials | Yes | - |
-| `oauth_server_uri` | OAuth token endpoint | No | - |
-| `auth_scope` | OAuth scope | No | - |
-| `auth_header_type` | Authentication header type | No | 'bearer' |
-| `warehouse` | Warehouse identifier | No | - |
-| `rest_catalog_connection_timeout` | Connection timeout in seconds | No | 10 |
-| `rest_catalog_read_timeout` | Read timeout in seconds | No | 60 | 
